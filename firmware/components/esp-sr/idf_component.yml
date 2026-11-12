@@ -1,0 +1,5 @@
+version: "2.6.2"
+description: "Verified ESP32-P4 AEC/VAD-only subset of official ESP-SR 2.6.2"
+dependencies:
+  idf: ">=5.5.3,<5.6"
+  espressif/dl_fft: "0.8.0"

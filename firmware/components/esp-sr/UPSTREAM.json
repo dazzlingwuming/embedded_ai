@@ -1,0 +1,39 @@
+{
+  "component": "esp-sr",
+  "upstream_version": "2.6.2",
+  "registry_archive": "https://components-file.espressif.com/components/espressif/esp-sr/2.6.2/espressif__esp-sr-v2.6.2.zip",
+  "checksums_url": "https://components-file.espressif.com/components/espressif/esp-sr/2.6.2/CHECKSUMS.json",
+  "selection": "DSP only: no language/recognition/synthesis models",
+  "files": {
+    "LICENSE": {
+      "path": "LICENSE",
+      "size": 1187,
+      "hash": "7d916fb00bc0742c47cafb0d0144b67f826d76779730b1cb8796045ea6ba1b9a"
+    },
+    "include/esp32p4/esp_aec.h": {
+      "path": "include/esp32p4/esp_aec.h",
+      "size": 7055,
+      "hash": "249d98eb33d344caafcd83dfafff1ba0f9b563147fa5a1ef8fddfcf3e006c8cf"
+    },
+    "include/esp32p4/esp_aec_nlp.h": {
+      "path": "include/esp32p4/esp_aec_nlp.h",
+      "size": 626,
+      "hash": "72a7bb61844cf77106fceecd08f45b8ee59b76c2f5cd559f015c710260d69105"
+    },
+    "include/esp32p4/esp_vad.h": {
+      "path": "include/esp32p4/esp_vad.h",
+      "size": 5075,
+      "hash": "afa170ef12dac8eab504055ba8b38a9bfc9c4f41d6aec8fe3268f8ac0d46cf4b"
+    },
+    "lib/esp32p4/libesp_audio_processor.a": {
+      "path": "lib/esp32p4/libesp_audio_processor.a",
+      "size": 6245254,
+      "hash": "7fe8f1fd7563fbd09917116fd6d621b3ddcd85715ba48442eb03f63071dd168b"
+    },
+    "lib/esp32p4/libdl_lib.a": {
+      "path": "lib/esp32p4/libdl_lib.a",
+      "size": 4412542,
+      "hash": "07174a92fae60884998186a843e06e9955b78c2dc4d491fe2b6de2068f6eedd2"
+    }
+  }
+}

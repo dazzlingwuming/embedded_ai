@@ -1,0 +1,2 @@
+# Compatibility entry point; keep one pinned dependency graph for both launchers.
+-r ../requirements.txt

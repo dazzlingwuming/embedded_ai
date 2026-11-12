@@ -1,0 +1,9 @@
+#pragma once
+#include "esp_err.h"
+#include "esp_http_server.h"
+#include "cJSON.h"
+#include "driver/i2c_master.h"
+i2c_master_bus_handle_t audio_capture_i2c_bus(void);
+esp_err_t audio_capture_init(void);
+esp_err_t audio_server_start(void);
+cJSON *audio_capture_status(void);

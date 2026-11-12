@@ -1,0 +1,16 @@
+{
+  "provider": "asr_deepseek_tts",
+  "api_host": "",
+  "asr_model": "fun-asr-realtime",
+  "tts_model": "cosyvoice-v3-flash",
+  "voice": "longanyang",
+  "proxy": "",
+  "volume": 75,
+  "max_session_seconds": 600,
+  "silence_duration_ms": 800,
+  "instructions": "你是友好的中文语音助手。普通闲聊可简短；用户明确要求全文、逐字朗读或详细内容时，完整完成，不自行省略或改成摘要。",
+  "echo_tail_ms": 500,
+  "interaction_mode": "automatic_interrupt",
+  "interruption_min_speech_ms": 200,
+  "tts_inactivity_seconds": 30
+}

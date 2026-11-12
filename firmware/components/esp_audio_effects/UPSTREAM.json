@@ -1,0 +1,29 @@
+{
+  "component": "esp_audio_effects",
+  "upstream_version": "1.4.5",
+  "registry_archive": "https://components-file.espressif.com/components/espressif/esp_audio_effects/1.4.5/espressif__esp_audio_effects-v1.4.5.zip",
+  "checksums_url": "https://components-file.espressif.com/components/espressif/esp_audio_effects/1.4.5/CHECKSUMS.json",
+  "selection": "DSP only: no language/recognition/synthesis models",
+  "files": {
+    "LICENSE": {
+      "path": "LICENSE",
+      "size": 1163,
+      "hash": "f9af95d73bd683a810ed8dc655b2af91258852934ba8e687ddcfaaf54ff2d755"
+    },
+    "include/esp_ae_rate_cvt.h": {
+      "path": "include/esp_ae_rate_cvt.h",
+      "size": 8633,
+      "hash": "36055590b324134745894707e610cc8bf6115f3eb9e5c101765129e9caee2510"
+    },
+    "include/esp_ae_types.h": {
+      "path": "include/esp_ae_types.h",
+      "size": 1985,
+      "hash": "a3f2ad4f9e5fe6593784ab586e157fbd910498cc77404c9f9026915096a3df71"
+    },
+    "lib/esp32p4/libesp_audio_effects.a": {
+      "path": "lib/esp32p4/libesp_audio_effects.a",
+      "size": 455704,
+      "hash": "05e08b2f8e1e26a7074f8e66fe5d16e5bbfbb957e2bfb49b30b35a42db4c5e95"
+    }
+  }
+}
