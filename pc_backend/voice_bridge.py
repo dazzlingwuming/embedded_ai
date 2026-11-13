@@ -145,7 +145,13 @@ class VoiceBridge:
             queue.get_nowait()
 
     async def start(self, protocol_test=False):
+        board_revision = getattr(self.console, 'board_revision', 0)
+        if getattr(self.console, 'switching_board', False):
+            raise VoiceError('正在切换开发板，请稍后重试')
         async with self.lifecycle_lock:
+            if (getattr(self.console, 'switching_board', False) or
+                    board_revision != getattr(self.console, 'board_revision', 0)):
+                raise VoiceError('正在切换开发板，请稍后重试')
             if self.active:
                 raise VoiceError('已有语音会话正在运行')
             state = self.console.status()

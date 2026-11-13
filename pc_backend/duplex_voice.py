@@ -18,6 +18,7 @@ from pc_backend.cloud_speech import SpeechTask
 from pc_backend.duplex_audio import (InterruptionGate, SPEECH_PACKET_BYTES,
     take_sentence, timed_speech_events, unpack_speech)
 from pc_backend.voice_config import load_config
+from pc_backend.vision_context import prepare_for_voice
 from pc_backend.voice_protocol import PCMConverter, PlaybackInterrupted, VoiceError
 
 
@@ -250,7 +251,7 @@ class DuplexVoiceBridge(ChainedVoiceBridge):
         self.gate = InterruptionGate(self.config['interruption_min_speech_ms'])
         history = [entry.copy() for entry in self.history]
         self.history.append({'role': 'user', 'content': text})
-        instructions = self.config['instructions']+' 使用适合朗读的纯文本和自然标点，不使用 Markdown。普通闲聊可简短；用户明确要求全文或逐字朗读时完整提供原文，不自行省略、改写或总结。分段只是播放方式，不限制回答长度。输入是 ASR 转写文字；不要声称已检查音质、摄像头、仪器读数或执行硬件操作。'
+        instructions = self.config['instructions']+' 使用适合朗读的纯文本和自然标点，不使用 Markdown。普通闲聊可简短；用户明确要求全文或逐字朗读时完整提供原文，不自行省略、改写或总结。分段只是播放方式，不限制回答长度。输入是 ASR 转写文字；不要声称已检查音质或执行未实际执行的设备操作。只有本轮实际附图时才描述摄像头画面；图中可见信息与设备直接测量应区分。'
         if self.previous_interrupted:
             instructions += ' 上一轮回答被用户打断；历史只保留已完整播出的短句，可能有一句只播放了部分。不要默认其他内容已经被听到，优先回答用户最新问题。'
             self.previous_interrupted = False
@@ -260,13 +261,28 @@ class DuplexVoiceBridge(ChainedVoiceBridge):
             pending = ''
             formatting = ''
             first_piece = True
-            reply = stream_reply(text, history, system_prompt=instructions)
+            prepared = await prepare_for_voice(self, text, turn.identity)
+            if turn.generation != self.generation:
+                if prepared:
+                    prepared.mark('cancelled')
+                raise PlaybackInterrupted()
+            options = {}
+            response_instructions = instructions
+            if prepared:
+                response_instructions += prepared.instructions
+                if prepared.images:
+                    options['images'] = prepared.images
+                prepared.mark('requesting' if prepared.images else 'no_image')
+            reply = stream_reply(text, history, system_prompt=response_instructions, **options)
+            completed = False
             try:
                 async for delta in reply:
                     if turn.generation != self.generation:
                         raise PlaybackInterrupted()
                     if not delta:
                         continue
+                    if prepared:
+                        prepared.mark('response_received' if prepared.images else 'no_image')
                     self.mark_response_timing(turn.identity,'llm_first_text_received_ms')
                     self.mark_response_timing(turn.identity,'llm_last_text_received_ms',replace=True)
                     turn.generated += delta; pending += delta
@@ -294,8 +310,13 @@ class DuplexVoiceBridge(ChainedVoiceBridge):
                     formatting += sentence
                 turn.trailing_formatting = formatting
                 await segments.put(None)
+                completed = True
+                if prepared:
+                    prepared.mark('completed' if prepared.images else 'no_image')
             finally:
                 await reply.aclose()
+                if prepared and not completed:
+                    prepared.mark('cancelled' if turn.generation != self.generation or self.stop_event.is_set() else 'error')
 
         async def synthesize_segment(tts, segment):
             received, finished = False, False

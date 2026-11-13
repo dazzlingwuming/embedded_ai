@@ -3,7 +3,7 @@ import argparse
 from array import array
 import asyncio
 from collections import deque
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 from datetime import datetime, timezone
 import ipaddress
 import json
@@ -23,12 +23,14 @@ from pc_backend.duplex_voice import DuplexVoiceBridge
 from pc_backend.voice_config import public_config as voice_config, save_config as save_voice_config
 from pc_backend.voice_protocol import VoiceError
 from pc_backend.camera_relay import CameraRelay, valid_photo_name
+from pc_backend.vision_context import VisionContext
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / 'data'
 UI = ROOT / 'pc_ui' / 'dist'
 HEADER = struct.Struct('<4sIQIHH')
 TERMINAL = {'completed', 'applied', 'rejected', 'expired', 'unknown'}
+BOARD_SWITCH_MESSAGE = '正在切换开发板，请稍后重试'
 
 
 def utc_now():
@@ -134,7 +136,11 @@ class Console:
         self.previous_audio_sequence = None
         self.commands = deque(maxlen=100)
         self.ai_lock = asyncio.Lock()
+        self.board_switch_lock = asyncio.Lock()
+        self.switching_board = False
+        self.board_revision = 0
         self.camera = CameraRelay(self)
+        self.vision = VisionContext(self)
         self.voice = DuplexVoiceBridge(self)
 
     async def request(self, method, path, payload=None):
@@ -310,6 +316,7 @@ class Console:
         age = time.monotonic() - self.board_seen if self.board_seen else None
         audio_age = time.monotonic() - self.last_audio if self.last_audio else None
         return {'board_url': self.board_url, 'board': self.board,
+                'switching_board': self.switching_board,
                 'board_connected': age is not None and age < 4,
                 'board_last_seen_seconds': round(age, 2) if age is not None else None,
                 'board_error': self.board_error,
@@ -317,7 +324,8 @@ class Console:
                           'last_frame_age_seconds': round(audio_age, 3) if audio_age is not None else None},
                 'recording': self.recording.meta.copy() if self.recording else None,
                 'simulator': self.fleet.status() if self.fleet else {'running': False},
-                'commands': list(self.commands), 'voice': self.voice.status(), 'camera': self.camera.status()}
+                'commands': list(self.commands), 'voice': self.voice.status(), 'camera': self.camera.status(),
+                'vision': self.vision.status()}
 
 
 def console(request):
@@ -342,37 +350,72 @@ async def get_status(request):
 
 async def set_config(request):
     state = console(request)
-    if state.recording or state.record_pending or state.voice.active:
-        return web.json_response({'error': '请先停止录音和语音通话，再更换开发板'}, status=409)
-    payload = await request.json()
-    address = valid_board_url(payload['board_url'])
-    if state.fleet:
-        await asyncio.to_thread(state.fleet.stop)
-        state.fleet = None
-    if state.audio_task and not state.audio_task.done():
-        state.audio_task.cancel()
-        await asyncio.gather(state.audio_task, return_exceptions=True)
-    await state.camera.reset()
-    state.board_url, state.board, state.board_seen = address, {}, 0
-    state.audio_event.clear()
-    (ROOT / 'local' / 'pc.json').write_text(json.dumps({'board_url': address}), encoding='utf-8')
-    if state.viewers:
-        state.ensure_audio()
-    return web.json_response({'board_url': address})
+    if state.board_switch_lock.locked():
+        return web.json_response({'error': BOARD_SWITCH_MESSAGE}, status=409)
+    async with state.board_switch_lock:
+        if state.recording or state.record_pending or state.voice.active or state.ai_lock.locked():
+            return web.json_response({'error': '请先结束录音、语音通话和文字回答，再更换开发板'}, status=409)
+        # Reserve the transition before reading a possibly slow request body.
+        # Chat, voice and recording admission all observe this same flag.
+        state.switching_board = True
+        resume_vision = False
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get('board_url'), str):
+                raise ValueError('开发板配置需要包含 board_url 文字地址')
+            address = valid_board_url(payload['board_url'])
+            if state.recording or state.record_pending or state.voice.active or state.ai_lock.locked():
+                return web.json_response({'error': '请先结束录音、语音通话和文字回答，再更换开发板'}, status=409)
+            # All validation happens before touching the existing connections.
+            if state.fleet:
+                await asyncio.to_thread(state.fleet.stop)
+                state.fleet = None
+            if state.audio_task and not state.audio_task.done():
+                state.audio_task.cancel()
+                await asyncio.gather(state.audio_task, return_exceptions=True)
+            resume_vision = True
+            await state.vision.close()
+            await state.camera.reset()
+            (ROOT / 'local' / 'pc.json').write_text(json.dumps({'board_url': address}), encoding='utf-8')
+            state.board_url, state.board, state.board_seen = address, {}, 0
+            state.board_revision = getattr(state, 'board_revision', 0) + 1
+            state.audio_event.clear()
+            if state.viewers:
+                state.ensure_audio()
+            await state.vision.start()
+            resume_vision = False
+            return web.json_response({'board_url': address})
+        finally:
+            try:
+                if resume_vision:
+                    # A failed/canceled reset must leave the old board's local
+                    # watcher recoverable, without hiding the original error.
+                    with suppress(Exception):
+                        await state.vision.start()
+            finally:
+                state.switching_board = False
 
 
 async def start_recording(request):
     state = console(request)
+    if getattr(state, 'switching_board', False):
+        return web.json_response({'error': BOARD_SWITCH_MESSAGE}, status=409)
     async with state.record_lock:
+        if getattr(state, 'switching_board', False):
+            return web.json_response({'error': BOARD_SWITCH_MESSAGE}, status=409)
         if state.voice.active:
             return web.json_response({'error': '请先结束语音通话，避免喇叭影响原始收音'}, status=409)
         if state.recording or state.record_pending:
             return web.json_response({'error': '已有录音正在进行'}, status=409)
         if not state.status()['board_connected'] or not state.board.get('audio', {}).get('ready'):
             return web.json_response({'error': '开发板或麦克风尚未就绪'}, status=503)
-        payload = await request.json()
         state.record_pending = True
         try:
+            payload = await request.json()
+            if getattr(state, 'switching_board', False):
+                return web.json_response({'error': BOARD_SWITCH_MESSAGE}, status=409)
+            if not isinstance(payload, dict):
+                raise ValueError('录音配置需要是对象')
             state.audio_event.clear()
             state.ensure_audio()
             await asyncio.wait_for(state.audio_event.wait(), 5)
@@ -496,6 +539,33 @@ async def get_camera_status(request):
     return web.json_response(console(request).camera.status())
 
 
+async def get_vision_status(request):
+    return web.json_response(console(request).vision.status())
+
+
+async def configure_vision(request):
+    state = console(request)
+    if getattr(state, 'switching_board', False):
+        return web.json_response({'error': BOARD_SWITCH_MESSAGE}, status=409)
+    if state.voice.active or state.ai_lock.locked():
+        return web.json_response({'error': '请先结束当前语音通话或文字回答，再修改摄像头参与设置'}, status=409)
+    payload = await request.json()
+    if getattr(state, 'switching_board', False):
+        return web.json_response({'error': BOARD_SWITCH_MESSAGE}, status=409)
+    if state.voice.active or state.ai_lock.locked():
+        return web.json_response({'error': '请先结束当前语音通话或文字回答，再修改摄像头参与设置'}, status=409)
+    if not isinstance(payload, dict):
+        raise ValueError('视觉配置需要是对象')
+    return web.json_response(await state.vision.configure(payload.get('enabled')))
+
+
+async def vision_frame(request):
+    data = console(request).vision.image(request.match_info['selection'], request.match_info['frame'])
+    if data is None:
+        raise web.HTTPNotFound(text='画面已过期，请提出新问题获取新画面')
+    return web.Response(body=data, content_type='image/jpeg', headers={'Cache-Control': 'no-store'})
+
+
 async def camera_websocket(request):
     return await console(request).camera.websocket(request)
 
@@ -536,11 +606,17 @@ async def configure_voice(request):
 
 
 async def start_voice(request):
-    return web.json_response(await console(request).voice.start())
+    state = console(request)
+    if getattr(state, 'switching_board', False):
+        return web.json_response({'error': BOARD_SWITCH_MESSAGE}, status=409)
+    return web.json_response(await state.voice.start())
 
 
 async def selftest_voice(request):
-    return web.json_response(await console(request).voice.start(protocol_test=True))
+    state = console(request)
+    if getattr(state, 'switching_board', False):
+        return web.json_response({'error': BOARD_SWITCH_MESSAGE}, status=409)
+    return web.json_response(await state.voice.start(protocol_test=True))
 
 
 async def stop_voice(request):
@@ -560,29 +636,61 @@ async def stop_console(request):
 
 async def ai_chat(request):
     state = console(request)
+    board_revision = getattr(state, 'board_revision', 0)
+    if getattr(state, 'switching_board', False):
+        return web.json_response({'error': BOARD_SWITCH_MESSAGE}, status=409)
     if state.ai_lock.locked():
         return web.json_response({'error': '已有 AI 回答正在生成'}, status=409)
     payload = await request.json()
+    if (getattr(state, 'switching_board', False) or
+            board_revision != getattr(state, 'board_revision', 0)):
+        return web.json_response({'error': BOARD_SWITCH_MESSAGE}, status=409)
+    if state.ai_lock.locked():
+        return web.json_response({'error': '已有 AI 回答正在生成'}, status=409)
+    if not isinstance(payload, dict):
+        return web.json_response({'error': 'AI 请求需要是对象'}, status=400)
     text = payload.get('text', '')
     if not isinstance(text, str) or not 1 <= len(text.strip()) <= 2000:
         return web.json_response({'error': '请输入 1～2000 个字符'}, status=400)
     if not ai_status().get('configured'):
         return web.json_response({'error': '请先将 DeepSeek 密钥填入 api_key/.env'}, status=503)
     async with state.ai_lock:
+        if getattr(state, 'switching_board', False):
+            return web.json_response({'error': BOARD_SWITCH_MESSAGE}, status=409)
         response = web.StreamResponse(headers={'Content-Type': 'text/event-stream; charset=utf-8',
                                               'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
         await response.prepare(request)
         async def event(data):
             await response.write(('data: ' + json.dumps(data, ensure_ascii=False) + '\n\n').encode())
+        prepared = None
         try:
-            async with aclosing(stream_reply(text, payload.get('history'))) as answer:
+            prepared = await state.vision.prepare('text', uuid.uuid4().hex)
+            await event({'vision': prepared.public})
+            options = {}
+            if prepared.images:
+                options.update(images=prepared.images,
+                               system_prompt='你是友好的中文视觉助手。依据用户的问题和实际提供的图片回答。'+prepared.instructions)
+            elif prepared.instructions:
+                options['system_prompt'] = '你是友好的中文助手。'+prepared.instructions
+            prepared.mark('requesting' if prepared.images else 'no_image')
+            first_delta = True
+            async with aclosing(stream_reply(text, payload.get('history'), **options)) as answer:
                 async for part in answer:
+                    if first_delta:
+                        prepared.mark('response_received' if prepared.images else 'no_image')
+                        await event({'vision': prepared.public})
+                        first_delta = False
                     await event({'delta': part})
+            prepared.mark('completed' if prepared.images else 'no_image')
+            await event({'vision': prepared.public})
             await event({'done': True})
         except AIError as error:
+            if prepared:
+                prepared.mark('error')
             await event({'error': str(error)})
         except (ConnectionResetError, asyncio.CancelledError):
-            pass
+            if prepared:
+                prepared.mark('cancelled')
         return response
 
 
@@ -590,8 +698,10 @@ async def lifecycle(app):
     state = app['console']
     state.http = ClientSession(trust_env=False, connector=TCPConnector(limit=16, limit_per_host=7))
     state.poll_task = asyncio.create_task(state.poll())
+    await state.vision.start()
     yield
     await state.voice.stop('console_stopped')
+    await state.vision.close()
     await state.camera.reset()
     if state.recording:
         state.finish_recording('interrupted', 'console_stopped')
@@ -620,6 +730,8 @@ def create_app(board_url):
         web.post('/api/commands', submit_command), web.get('/api/commands/{id}', command_status),
         web.get('/api/ai/status', get_ai_status), web.post('/api/ai/chat', ai_chat),
         web.get('/api/camera/status', get_camera_status), web.get('/ws/camera', camera_websocket),
+        web.get('/api/vision/status', get_vision_status), web.post('/api/vision/config', configure_vision),
+        web.get('/api/vision/frame/{selection}/{frame}.jpg', vision_frame),
         web.post('/api/camera/capture', save_camera_photo), web.get('/api/camera/photos/{name}', camera_photo),
         web.post('/api/camera/config', configure_camera),
         web.get('/api/voice/status', get_voice_status), web.post('/api/voice/config', configure_voice),

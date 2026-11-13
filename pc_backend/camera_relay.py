@@ -1,4 +1,4 @@
-"""One real MJPEG upstream shared by local viewers; retain only the newest frame."""
+"""One real MJPEG upstream shared by browser viewers and local vision consumers."""
 import asyncio
 from collections import deque
 from contextlib import suppress
@@ -59,6 +59,8 @@ class CameraRelay:
         self.info = None
         self.info_seen = 0
         self.viewers = set()
+        self.consumers = {}
+        self.consumer_errors = 0
         self.task = None
         self.latest = None
         self.last_frame = 0
@@ -94,6 +96,7 @@ class CameraRelay:
                 'connected': bool(self.latest and now-self.last_frame < 4),
                 'source': 'real_camera', 'resolution': (self.info or {}).get('currentResolution'),
                 'frames': self.frames, 'fps': round(fps, 1), 'viewers': len(self.viewers),
+                'consumers': len(self.consumers), 'consumer_errors': self.consumer_errors,
                 'quality': (self.info or {}).get('currentQuality'),
                 'frame_bytes': len(self.latest) if self.latest else None, 'bytes_received': self.bytes_received,
                 'last_frame_age_seconds': round(now-self.last_frame, 2) if self.last_frame else None,
@@ -104,6 +107,21 @@ class CameraRelay:
             if queue.full():
                 queue.get_nowait()
             queue.put_nowait(item)
+
+    async def acquire(self, name, callback):
+        """Keep the shared upstream alive without a browser websocket."""
+        if not self.ready:
+            raise ValueError('摄像头尚未就绪')
+        async with self.lock:
+            self.consumers[name] = callback
+            if self.task is None or self.task.done():
+                self.task = asyncio.create_task(self.run())
+
+    async def release(self, name):
+        async with self.lock:
+            self.consumers.pop(name, None)
+            if not self.viewers and not self.consumers:
+                await self.stop()
 
     async def run(self):
         self.error = None
@@ -132,7 +150,14 @@ class CameraRelay:
                         self.bytes_received += len(frame)
                         self.times.append(self.last_frame)
                         self.broadcast(frame)
-            if self.viewers:
+                        for callback in tuple(self.consumers.values()):
+                            try:
+                                # Consumers only enqueue bytes here; JPEG decoding
+                                # and scoring must run outside the audio event loop.
+                                callback(frame, self.last_frame)
+                            except Exception:
+                                self.consumer_errors += 1
+            if self.viewers or self.consumers:
                 raise ValueError('摄像头视频连接已结束，请重新开始预览')
         except asyncio.CancelledError:
             raise
@@ -155,6 +180,7 @@ class CameraRelay:
     async def reset(self):
         async with self.lock:
             self.broadcast({'error': '开发板连接已切换，请重新开始预览'})
+            self.consumers.clear()
             await self.stop()
             self.info, self.info_seen, self.error = None, 0, None
 
@@ -192,7 +218,7 @@ class CameraRelay:
             sender.cancel(); receiver.cancel()
             async with self.lock:
                 self.viewers.discard(queue)
-                if not self.viewers:
+                if not self.viewers and not self.consumers:
                     await self.stop()
             await asyncio.gather(sender, receiver, return_exceptions=True)
             with suppress(Exception):

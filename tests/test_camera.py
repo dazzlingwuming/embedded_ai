@@ -49,6 +49,29 @@ class CameraFrameTests(unittest.TestCase):
 
 
 class CameraRelayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_vision_consumer_keeps_shared_upstream_after_browser_closes(self):
+        seen = []
+        await self.relay.acquire('vision-test', lambda image, stamp: seen.append((image, stamp)))
+        for _ in range(40):
+            if seen:
+                break
+            await asyncio.sleep(.01)
+        viewer = await self.connect()
+        self.assertEqual(await viewer.receive_bytes(timeout=2), self.frame)
+        await viewer.close()
+        await asyncio.sleep(.05)
+        self.assertEqual(self.connections, 1)
+        self.assertEqual(self.active_upstreams, 1)
+        self.assertEqual(seen[-1][0], self.frame)
+        self.assertGreater(seen[-1][1], 0)
+        await self.relay.release('vision-test')
+        for _ in range(40):
+            if not self.active_upstreams:
+                break
+            await asyncio.sleep(.01)
+        self.assertEqual(self.active_upstreams, 0)
+        self.assertFalse(self.relay.consumers)
+
     async def test_invalid_quality_does_not_send_a_request_to_board(self):
         relay = CameraRelay(SimpleNamespace())
         for value in (True, 19, 91, '40', None):

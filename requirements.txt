@@ -12,3 +12,5 @@ idna==3.20
 typing_extensions==4.16.0
 # Used by scripts/serial-log.py; the web console itself uses Wi-Fi/HTTP.
 pyserial==3.5
+# Local JPEG quality scoring and multimodal input validation; no AI model.
+Pillow==13.0.0
